@@ -1,0 +1,18 @@
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Jupyter notebooks
+.ipynb_checkpoints
+
+# Data files
+*.csv
+
+# Saved models
+*.joblib
+*.bin
+
+# Output directories
+eda_outputs/
