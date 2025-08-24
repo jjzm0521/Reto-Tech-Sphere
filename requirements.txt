@@ -4,6 +4,9 @@ scikit-learn==1.7.1
 joblib==1.5.1
 torch==2.3.0
 transformers==4.35.2
+datasets==2.14.5
+pyarrow==14.0.1
+accelerate==0.21.0
 
 # Text Processing
 spacy==3.7.5

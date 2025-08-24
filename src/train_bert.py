@@ -1,215 +1,177 @@
+# ==============================================================================
+# CELDA 1: INSTALACIÓN, CARGA Y PREPARACIÓN DE DATOS (ADAPTADA)
+# ==============================================================================
+
+# 1. IMPORTACIÓN DE LIBRERÍAS
 import pandas as pd
 import numpy as np
 import torch
-from torch.utils.data import Dataset, DataLoader
-from torch.optim import AdamW
-from transformers import AutoTokenizer, AutoModel, get_linear_schedule_with_warmup
+from datasets import Dataset
 from sklearn.metrics import f1_score, roc_auc_score
-from skmultilearn.model_selection import iterative_train_test_split
-import time
+from sklearn.model_selection import train_test_split
+from transformers import AutoTokenizer, AutoModelForSequenceClassification, TrainingArguments, Trainer
 import os
 
-# --- Configuration ---
-PROCESSED_DATA_FILE = 'processed_data.pkl'
-TEST_DATA_SAVE_PATH = 'bert_test_data.pkl' # Path to save the test data
-MODEL_NAME = 'dmis-lab/biobert-base-cased-v1.1'
-MODEL_SAVE_PATH = 'biobert_model.bin'
-DOMAINS = ['Cardiovascular', 'Neurological', 'Hepatorenal', 'Oncological']
-RANDOM_STATE = 42
-MAX_LEN = 256 # Reduced from 512 to prevent timeout
-BATCH_SIZE = 4 # Reduced from 8 to prevent OOM errors
-EPOCHS = 1 # Reduced from 3 to prevent timeout
-LEARNING_RATE = 2e-5
-SMOKE_TEST = True # Use a small subset of data to ensure the script runs
+# 2. CARGA Y PREPARACIÓN DE LOS DATOS
+PROCESSED_DATA_PATH = "processed_data.pkl"
 
-# Check for GPU
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-print(f"Using device: {device}")
+try:
+    df = pd.read_pickle(PROCESSED_DATA_PATH)
+    print(f"\nDataset preprocesado cargado exitosamente desde: '{PROCESSED_DATA_PATH}'")
+except FileNotFoundError:
+    print(f"\nError: No se encontró el archivo en la ruta '{PROCESSED_DATA_PATH}'.")
+    print("Por favor, ejecuta primero el script `src/train.py` para generar el archivo de datos preprocesado.")
+    exit()
 
-# --- PyTorch Dataset Class ---
-class MedicalArticleDataset(Dataset):
-    def __init__(self, texts, labels, tokenizer, max_len):
-        self.texts = texts
-        self.labels = labels
-        self.tokenizer = tokenizer
-        self.max_len = max_len
+# 3. CONFIGURACIÓN Y PREPROCESAMIENTO
+TEXT_COLUMN = 'text'
+LABEL_COLUMNS = ['Cardiovascular', 'Neurological', 'Hepatorenal', 'Oncological']
+SMOKE_TEST = True # Poner en False para entrenar con todos los datos
 
-    def __len__(self):
-        return len(self.texts)
+# El DataFrame ya tiene las columnas de etiquetas binarizadas
+# Crear la columna 'labels' en el formato que espera el Trainer
+df['labels'] = df[LABEL_COLUMNS].values.tolist()
+df_model = df[[TEXT_COLUMN, 'labels']].copy()
 
-    def __getitem__(self, item):
-        text = str(self.texts[item])
-        label = self.labels[item]
+# Dividir los datos en conjuntos de entrenamiento, validación y prueba (80%, 10%, 10%)
+train_val_df, test_df = train_test_split(
+    df_model,
+    test_size=0.1,
+    random_state=42
+)
+train_df, val_df = train_test_split(
+    train_val_df,
+    test_size=0.111,  # 0.1 / 0.9 = 0.111...
+    random_state=42
+)
 
-        encoding = self.tokenizer.encode_plus(
-            text,
-            add_special_tokens=True,
-            max_length=self.max_len,
-            return_token_type_ids=False,
-            padding='max_length',
-            truncation=True,
-            return_attention_mask=True,
-            return_tensors='pt',
-        )
+if SMOKE_TEST:
+    print("\n--- SMOKE TEST ACTIVADO ---")
+    print("Usando un subconjunto de los datos y menos épocas para una ejecución rápida.")
+    train_df = train_df.head(80)
+    val_df = val_df.head(20)
+    test_df = test_df.head(20)
 
-        return {
-            'input_ids': encoding['input_ids'].flatten(),
-            'attention_mask': encoding['attention_mask'].flatten(),
-            'labels': torch.FloatTensor(label)
-        }
+train_dataset = Dataset.from_pandas(train_df)
+val_dataset = Dataset.from_pandas(val_df)
+test_dataset = Dataset.from_pandas(test_df)
 
-# --- PyTorch Model Class ---
-class BiobertClassifier(torch.nn.Module):
-    def __init__(self, n_classes):
-        super(BiobertClassifier, self).__init__()
-        self.bert = AutoModel.from_pretrained(MODEL_NAME)
-        self.drop = torch.nn.Dropout(p=0.3)
-        self.out = torch.nn.Linear(self.bert.config.hidden_size, n_classes)
-
-    def forward(self, input_ids, attention_mask):
-        outputs = self.bert(
-            input_ids=input_ids,
-            attention_mask=attention_mask
-        )
-        # We use the [CLS] token's output for classification
-        pooled_output = outputs.pooler_output
-        output = self.drop(pooled_output)
-        return self.out(output)
-
-# --- Helper Functions ---
-def create_data_loader(df, tokenizer, max_len, batch_size):
-    ds = MedicalArticleDataset(
-        texts=df.text.to_numpy(),
-        labels=df[DOMAINS].values,
-        tokenizer=tokenizer,
-        max_len=max_len
-    )
-    return DataLoader(ds, batch_size=batch_size, num_workers=2)
-
-def train_epoch(model, data_loader, loss_fn, optimizer, device, scheduler):
-    model = model.train()
-    losses = []
-    for d in data_loader:
-        input_ids = d["input_ids"].to(device)
-        attention_mask = d["attention_mask"].to(device)
-        labels = d["labels"].to(device)
-
-        outputs = model(input_ids=input_ids, attention_mask=attention_mask)
-        loss = loss_fn(outputs, labels)
-
-        losses.append(loss.item())
-
-        loss.backward()
-        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-        optimizer.step()
-        scheduler.step()
-        optimizer.zero_grad()
-
-    return np.mean(losses)
-
-def eval_model(model, data_loader, loss_fn, device):
-    model = model.eval()
-    losses = []
-    fin_targets = []
-    fin_outputs = []
-    with torch.no_grad():
-        for d in data_loader:
-            input_ids = d["input_ids"].to(device)
-            attention_mask = d["attention_mask"].to(device)
-            labels = d["labels"].to(device)
-
-            outputs = model(input_ids=input_ids, attention_mask=attention_mask)
-            loss = loss_fn(outputs, labels)
-            losses.append(loss.item())
-
-            fin_targets.extend(labels.cpu().detach().numpy().tolist())
-            fin_outputs.extend(torch.sigmoid(outputs).cpu().detach().numpy().tolist())
-
-    return np.mean(losses), np.array(fin_targets), np.array(fin_outputs)
+print(f"\nTamaño del conjunto de entrenamiento: {len(train_dataset)}")
+print(f"Tamaño del conjunto de validación:   {len(val_dataset)}")
+print(f"Tamaño del conjunto de prueba:        {len(test_dataset)}")
+print("\n¡Preparación de datos finalizada!")
 
 
-# --- Main Training Execution ---
-if __name__ == '__main__':
-    if not os.path.exists(PROCESSED_DATA_FILE):
-        print(f"Error: Processed data file not found at {PROCESSED_DATA_FILE}")
-        print("Please run the baseline training script (`src/train.py`) first to generate it.")
-    else:
-        # 1. Load Data and Split
-        df = pd.read_pickle(PROCESSED_DATA_FILE)
+# ==============================================================================
+# CELDA 2: CONFIGURACIÓN DEL EXPERIMENTO, MODELO Y TOKENIZADOR
+# ==============================================================================
 
-        # Use the raw text column for BERT
-        X = df[['text']]
-        y = df[DOMAINS].values
+# Modelo seleccionado: SciBERT (demostró mejor rendimiento)
+MODEL_NAME = 'allenai/scibert_scivocab_cased'
+EXPERIMENT_NAME = "scibert-finetune-cased"
 
-        X_np = np.array(X.index).reshape(-1, 1)
-        y_np = np.array(y)
+print(f"\n--- Iniciando experimento: {EXPERIMENT_NAME} ---")
+print(f"Modelo base seleccionado: {MODEL_NAME}")
 
-        X_train_idx, y_train, X_temp_idx, y_temp = iterative_train_test_split(X_np, y_np, test_size=0.3)
-        X_val_idx, y_val, X_test_idx, y_test = iterative_train_test_split(X_temp_idx, y_temp, test_size=0.5)
+# 1. CARGA DEL TOKENIZADOR
+tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
 
-        df_train = df.loc[X_train_idx.flatten()]
-        df_val = df.loc[X_val_idx.flatten()]
-        df_test = df.loc[X_test_idx.flatten()]
+def tokenize_function(examples):
+    return tokenizer(examples[TEXT_COLUMN], padding="max_length", truncation=True, max_length=512)
 
-        # Save the test dataframe for later evaluation
-        df_test.to_pickle(TEST_DATA_SAVE_PATH)
-        print(f"Test data saved to {TEST_DATA_SAVE_PATH}")
+# 2. TOKENIZACIÓN DE LOS DATASETS
+print("\nTokenizando los datasets...")
+tokenized_train_dataset = train_dataset.map(tokenize_function, batched=True)
+tokenized_val_dataset = val_dataset.map(tokenize_function, batched=True)
+tokenized_test_dataset = test_dataset.map(tokenize_function, batched=True)
 
-        if SMOKE_TEST:
-            print("--- SMOKE TEST ENABLED: Using a small subset of data. ---")
-            df_train = df_train.head(100)
-            df_val = df_val.head(50)
+# 3. FORMATEO FINAL DE ETIQUETAS
+def format_labels(dataset):
+    labels = [np.array(label, dtype=np.float32) for label in dataset['labels']]
+    dataset = dataset.remove_columns('labels')
+    dataset = dataset.add_column('labels', labels)
+    return dataset
 
-        print(f"Train size: {len(df_train)}, Val size: {len(df_val)}, Test size: {len(df_test)}")
+tokenized_train_dataset = format_labels(tokenized_train_dataset)
+tokenized_val_dataset = format_labels(tokenized_val_dataset)
+tokenized_test_dataset = format_labels(tokenized_test_dataset)
+print("¡Tokenización completa!")
 
-        # 2. Setup Tokenizer and DataLoaders
-        tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
-        train_data_loader = create_data_loader(df_train, tokenizer, MAX_LEN, BATCH_SIZE)
-        val_data_loader = create_data_loader(df_val, tokenizer, MAX_LEN, BATCH_SIZE)
+# 4. CARGA DEL MODELO PRE-ENTRENADO
+print(f"\nCargando modelo pre-entrenado '{MODEL_NAME}'...")
+model = AutoModelForSequenceClassification.from_pretrained(
+    MODEL_NAME,
+    num_labels=len(LABEL_COLUMNS),
+    problem_type="multi_label_classification"
+)
+print("\n¡Modelo y tokenizador listos para el entrenamiento!")
 
-        # 3. Initialize Model, Optimizer, etc.
-        model = BiobertClassifier(n_classes=len(DOMAINS))
-        model = model.to(device)
 
-        optimizer = AdamW(model.parameters(), lr=LEARNING_RATE)
-        total_steps = len(train_data_loader) * EPOCHS
-        scheduler = get_linear_schedule_with_warmup(
-            optimizer,
-            num_warmup_steps=0,
-            num_training_steps=total_steps
-        )
+# ==============================================================================
+# CELDA 3: ENTRENAMIENTO, EVALUACIÓN Y GUARDADO
+# ==============================================================================
 
-        # Use BCEWithLogitsLoss for multi-label classification, it's more stable
-        loss_fn = torch.nn.BCEWithLogitsLoss().to(device)
+# 1. DEFINICIÓN DE MÉTRICAS
+def compute_metrics(p):
+    preds = p.predictions[0] if isinstance(p.predictions, tuple) else p.predictions
+    sigmoid = torch.nn.Sigmoid()
+    probs = sigmoid(torch.Tensor(preds))
+    y_pred = np.zeros(probs.shape)
+    y_pred[np.where(probs >= 0.5)] = 1
+    y_true = p.label_ids
+    f1_weighted = f1_score(y_true=y_true, y_pred=y_pred, average='weighted', zero_division=0)
+    roc_auc = roc_auc_score(y_true, probs, average='weighted')
+    return {
+        'f1_weighted': f1_weighted,
+        'roc_auc_weighted': roc_auc
+    }
 
-        # 4. Training Loop
-        best_f1 = 0
-        for epoch in range(EPOCHS):
-            print(f'--- Epoch {epoch + 1}/{EPOCHS} ---')
-            start_time = time.time()
+# 2. CONFIGURACIÓN DEL ENTRENAMIENTO
+OUTPUT_DIR = f"./{EXPERIMENT_NAME}-results"
+FINAL_MODEL_PATH = f"./{EXPERIMENT_NAME}-final-model"
 
-            train_loss = train_epoch(model, train_data_loader, loss_fn, optimizer, device, scheduler)
-            val_loss, targets, outputs = eval_model(model, val_data_loader, loss_fn, device)
+training_args = TrainingArguments(
+    output_dir=OUTPUT_DIR,
+    learning_rate=2e-5,
+    per_device_train_batch_size=2,  # Reducido para ahorrar memoria
+    per_device_eval_batch_size=2,   # Reducido para ahorrar memoria
+    gradient_accumulation_steps=4,  # Acumular gradientes para simular un batch size de 8
+    num_train_epochs=1 if SMOKE_TEST else 3,
+    weight_decay=0.01,
+    evaluation_strategy="epoch",
+    save_strategy="epoch",
+    load_best_model_at_end=True,
+    metric_for_best_model="f1_weighted",
+    greater_is_better=True,
+    save_total_limit=1,
+    report_to="none",
+)
 
-            # Apply a 0.5 threshold to get binary predictions
-            preds = outputs >= 0.5
+# 3. CREACIÓN DEL OBJETO TRAINER
+trainer = Trainer(
+    model=model,
+    args=training_args,
+    train_dataset=tokenized_train_dataset,
+    eval_dataset=tokenized_val_dataset,
+    tokenizer=tokenizer,
+    compute_metrics=compute_metrics,
+)
 
-            # Calculate F1 score
-            f1_val = f1_score(targets, preds, average='weighted')
+# 4. ENTRENAMIENTO
+print(f"\nIniciando el fine-tuning del modelo: {EXPERIMENT_NAME}...")
+trainer.train()
+print("¡Entrenamiento completado!")
 
-            elapsed_time = time.time() - start_time
-            print(f'Train loss {train_loss:.4f} | Val loss {val_loss:.4f} | Val F1 {f1_val:.4f} | Time {elapsed_time:.2f}s')
+# 5. EVALUACIÓN FINAL SOBRE EL CONJUNTO DE PRUEBA
+print("\n--- Evaluación Final ---")
+print("Evaluando el rendimiento del MEJOR modelo sobre el conjunto de PRUEBA...")
+test_results = trainer.evaluate(eval_dataset=tokenized_test_dataset)
 
-            # Save the best model based on validation F1 score
-            if f1_val > best_f1:
-                torch.save(model.state_dict(), MODEL_SAVE_PATH)
-                best_f1 = f1_val
-                print(f"Best model saved with F1-score: {best_f1:.4f}")
+print("\nResultados Finales en el Conjunto de Prueba:")
+print(test_results)
 
-        print("\n--- Training complete! ---")
-        print(f"Best validation F1-score: {best_f1:.4f}")
-        # Final confirmation message
-        if os.path.exists(MODEL_SAVE_PATH):
-            print(f"Model successfully saved to {MODEL_SAVE_PATH}")
-        else:
-            print("Model was not saved. Check training loop logic.")
+# 6. GUARDADO PERMANENTE DEL MODELO FINAL
+print(f"\nGuardando el modelo final y el tokenizador en '{FINAL_MODEL_PATH}'...")
+trainer.save_model(FINAL_MODEL_PATH)
+tokenizer.save_pretrained(FINAL_MODEL_PATH)
+print(f"¡Proceso completado! Modelo guardado en '{FINAL_MODEL_PATH}'.")
