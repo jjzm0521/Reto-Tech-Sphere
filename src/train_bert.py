@@ -11,6 +11,7 @@ import os
 
 # --- Configuration ---
 PROCESSED_DATA_FILE = 'processed_data.pkl'
+TEST_DATA_SAVE_PATH = 'bert_test_data.pkl' # Path to save the test data
 MODEL_NAME = 'dmis-lab/biobert-base-cased-v1.1'
 MODEL_SAVE_PATH = 'biobert_model.bin'
 DOMAINS = ['Cardiovascular', 'Neurological', 'Hepatorenal', 'Oncological']
@@ -148,7 +149,11 @@ if __name__ == '__main__':
 
         df_train = df.loc[X_train_idx.flatten()]
         df_val = df.loc[X_val_idx.flatten()]
-        df_test = df.loc[X_test_idx.flatten()] # Keep test set for final evaluation
+        df_test = df.loc[X_test_idx.flatten()]
+
+        # Save the test dataframe for later evaluation
+        df_test.to_pickle(TEST_DATA_SAVE_PATH)
+        print(f"Test data saved to {TEST_DATA_SAVE_PATH}")
 
         if SMOKE_TEST:
             print("--- SMOKE TEST ENABLED: Using a small subset of data. ---")
@@ -195,17 +200,16 @@ if __name__ == '__main__':
             elapsed_time = time.time() - start_time
             print(f'Train loss {train_loss:.4f} | Val loss {val_loss:.4f} | Val F1 {f1_val:.4f} | Time {elapsed_time:.2f}s')
 
-            # In this constrained environment, we cannot save the large model file.
-            # We are just proving that the training loop completes.
-            # if f1_val > best_f1:
-            #     torch.save(model.state_dict(), MODEL_SAVE_PATH)
-            #     best_f1 = f1_val
-            #     print(f"Best model saved with F1-score: {best_f1:.4f}")
-
-            # We will still track the best f1 score
+            # Save the best model based on validation F1 score
             if f1_val > best_f1:
+                torch.save(model.state_dict(), MODEL_SAVE_PATH)
                 best_f1 = f1_val
+                print(f"Best model saved with F1-score: {best_f1:.4f}")
 
         print("\n--- Training complete! ---")
         print(f"Best validation F1-score: {best_f1:.4f}")
-        print(f"Model saved to {MODEL_SAVE_PATH}")
+        # Final confirmation message
+        if os.path.exists(MODEL_SAVE_PATH):
+            print(f"Model successfully saved to {MODEL_SAVE_PATH}")
+        else:
+            print("Model was not saved. Check training loop logic.")

@@ -2,6 +2,8 @@
 pandas==2.3.2
 scikit-learn==1.7.1
 joblib==1.5.1
+torch==2.3.0
+transformers==4.35.2
 
 # Text Processing
 spacy==3.7.5
