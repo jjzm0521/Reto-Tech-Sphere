@@ -1,10 +1,16 @@
 import joblib
 from sklearn.metrics import f1_score, classification_report, hamming_loss
 import pandas as pd
+import os
 
 # --- Configuration ---
-MODEL_FILE = 'baseline_model.joblib'
-TEST_DATA_FILE = 'test_data.joblib'
+# Get the directory of the current script
+script_dir = os.path.dirname(os.path.abspath(__file__))
+# Go up one level to the project root (src -> modelo-baseline)
+project_root = os.path.dirname(script_dir)
+
+MODEL_FILE = os.path.join(project_root, 'results', 'models', 'baseline_model.joblib')
+TEST_DATA_FILE = os.path.join(project_root, 'results', 'models', 'test_data.joblib')
 DOMAINS = ['Cardiovascular', 'Neurological', 'Hepatorenal', 'Oncological']
 
 # --- Main Evaluation Script ---
@@ -22,7 +28,7 @@ def evaluate_model():
         y_test = test_data['y_test']
     except FileNotFoundError as e:
         print(f"Error: Could not find a required file. {e}")
-        print("Please run the training script (train.py) first to generate the model and test data.")
+        print("Please run the training script (train_model.py) first to generate the model and test data.")
         return
 
     # 2. Make Predictions
