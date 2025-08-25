@@ -1,6 +1,6 @@
 import pandas as pd
 import numpy as np
-from preprocessing import preprocess_text, binarize_labels
+from src.preprocessing import preprocess_text, binarize_labels
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.linear_model import LogisticRegression
 from sklearn.multiclass import OneVsRestClassifier
