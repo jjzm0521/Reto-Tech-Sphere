@@ -6,8 +6,8 @@ import os
 import re
 
 # --- Configuration ---
-DATA_FILE = 'challenge_data-18-ago.csv'
-OUTPUT_DIR = 'eda_outputs'
+DATA_FILE = r'modelo-baseline\data\raw\challenge_data-18-ago.csv'
+OUTPUT_DIR = r'modelo-baseline\results\images'
 DOMAINS = ['Cardiovascular', 'Neurological', 'Hepatorenal', 'Oncological']
 
 # --- Helper Functions ---
