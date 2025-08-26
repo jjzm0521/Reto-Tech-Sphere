@@ -1,5 +1,7 @@
 import joblib
-from sklearn.metrics import f1_score, classification_report, hamming_loss
+from sklearn.metrics import (f1_score, classification_report,
+                             precision_score, recall_score, accuracy_score,
+                             multilabel_confusion_matrix)
 import pandas as pd
 import os
 
@@ -17,43 +19,95 @@ DOMAINS = ['Cardiovascular', 'Neurological', 'Hepatorenal', 'Oncological']
 def evaluate_model():
     """
     Loads a trained model and test data, evaluates the model,
-    and prints the performance metrics.
+    and prints a formatted text report of the performance metrics.
     """
     # 1. Load Model and Data
-    print(f"Loading model from {MODEL_FILE} and test data from {TEST_DATA_FILE}...")
+    print("--- Loading Model and Data ---")
     try:
         pipeline = joblib.load(MODEL_FILE)
         test_data = joblib.load(TEST_DATA_FILE)
         X_test = test_data['X_test']
         y_test = test_data['y_test']
+        print("Model and data loaded successfully.")
     except FileNotFoundError as e:
         print(f"Error: Could not find a required file. {e}")
         print("Please run the training script (train_model.py) first to generate the model and test data.")
         return
 
     # 2. Make Predictions
-    print("Making predictions on the test set...")
+    print("\n--- Making Predictions ---")
     y_pred = pipeline.predict(X_test)
+    print("Predictions made on the test set.")
 
-    # 3. Calculate and Print Metrics
-    print("\n--- Model Evaluation Results ---")
+    # 3. Calculate All Metrics
+    print("\n--- Calculating Metrics ---")
+    # Global Metrics
+    global_metrics = {
+        "f1_score_weighted": f1_score(y_test, y_pred, average='weighted', zero_division=0),
+        "precision_weighted": precision_score(y_test, y_pred, average='weighted', zero_division=0),
+        "recall_weighted": recall_score(y_test, y_pred, average='weighted', zero_division=0),
+        "subset_accuracy": accuracy_score(y_test, y_pred)
+    }
 
-    # Weighted F1-Score
-    f1_weighted = f1_score(y_test, y_pred, average='weighted')
-    print(f"\nWeighted F1-Score: {f1_weighted:.4f}")
+    # Per-Category Metrics from classification_report
+    class_report = classification_report(y_test, y_pred, target_names=DOMAINS, zero_division=0, output_dict=True)
+    category_metrics = {k: v for k, v in class_report.items() if k in DOMAINS}
 
-    # Hamming Loss
-    hamming = hamming_loss(y_test, y_pred)
-    print(f"Hamming Loss: {hamming:.4f}")
-    print("(Lower is better. It's the fraction of labels that are incorrectly predicted.)")
+    # Confusion Matrices
+    mcm = multilabel_confusion_matrix(y_test, y_pred)
+    confusion_matrices = {domain: mcm[i] for i, domain in enumerate(DOMAINS)}
+    print("All metrics calculated.")
 
-    # Classification Report (per-class metrics)
-    print("\nClassification Report (per-class performance):")
-    # Use target_names to label the classes in the report
-    report = classification_report(y_test, y_pred, target_names=DOMAINS, zero_division=0)
-    print(report)
+    # 4. Generate and Print Text Report
+    print("\n--- Generating Final Report ---")
+    text_report = generate_text_report(global_metrics, category_metrics, confusion_matrices)
+    print("\n" + "="*80)
+    print(text_report)
+    print("="*80 + "\n")
 
     print("--- Evaluation script finished. ---")
+
+
+def generate_text_report(global_metrics, category_metrics, confusion_matrices):
+    """
+    Generates a formatted text block with model performance metrics.
+    """
+    # Title
+    report = "Análisis de Rendimiento del Modelo de Clasificación Biomédica\n\n"
+
+    # Global Metrics Section
+    report += "Métricas Globales\n"
+    report += "-"*20 + "\n"
+    report += f"- F1-Score Ponderado: {global_metrics['f1_score_weighted']:.3f}\n"
+    report += f"- Precisión Ponderada: {global_metrics['precision_weighted']:.3f}\n"
+    report += f"- Recall Ponderado: {global_metrics['recall_weighted']:.3f}\n"
+    report += f"- Exactitud de Subconjunto: {global_metrics['subset_accuracy']:.3f}\n\n"
+
+    # Per-Category Performance Section
+    report += "Rendimiento por Categoría\n"
+    report += "-"*28 + "\n"
+    # Create a formatted table header
+    header = f"{'Categoría':<15} | {'Precisión':>10} | {'Recall':>10} | {'F1-Score':>10} | {'Soporte':>10}\n"
+    report += header
+    report += "-"*len(header) + "\n"
+    # Create table rows
+    for domain, metrics in category_metrics.items():
+        report += (f"{domain:<15} | {metrics['precision']:>10.3f} | "
+                   f"{metrics['recall']:>10.3f} | {metrics['f1-score']:>10.3f} | "
+                   f"{metrics['support']:>10.0f}\n")
+    report += "\n"
+
+    # Confusion Matrices Section
+    report += "Matrices de Confusión\n"
+    report += "-"*24 + "\n"
+    for domain, matrix in confusion_matrices.items():
+        tn, fp, fn, tp = matrix.ravel()
+        report += f"- Matriz para {domain}:\n"
+        report += f"  [TN: {tn}, FP: {fp}]\n"
+        report += f"  [FN: {fn}, TP: {tp}]\n\n"
+
+    return report.strip()
+
 
 if __name__ == '__main__':
     evaluate_model()
